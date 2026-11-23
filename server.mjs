@@ -7,8 +7,11 @@ import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { templatePdf, templates } from './pdf.mjs';
 import { mockProvider } from './mock-provider.mjs';
+import { configureZohoMail } from './zoho-mail.mjs';
 
 const env = process.env;
+const zohoMail = await configureZohoMail(env);
+const pendingAcceptanceEmails = new Set();
 const mode = env.ESIGN_MODE ?? 'mock';
 if (!['mock', 'live'].includes(mode)) throw Error('ESIGN_MODE must be mock or live');
 const port = Number(env.PORT ?? 8787);
@@ -323,27 +326,43 @@ async function route(req, res) {
         return info;
       });
       if (accepted.acceptanceEmailAt) return send(res, 200, { emailStatus: 'Gateway accepted' });
-      if (!env.INVITE_WEBHOOK) return send(res, 200, { emailStatus: 'Accepted. Email gateway is unconfigured.' });
-      const url = new URL(env.INVITE_WEBHOOK);
-      if (url.protocol !== 'https:' || !env.INVITE_WEBHOOK_TOKEN) fail(503, 'Email gateway needs HTTPS and a token');
-      const attachment = pdf(get(row.id), 'final').toString('base64');
-      const delivery = await fetch(url, { method: 'POST', redirect: 'error', signal: AbortSignal.timeout(15000),
-        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + env.INVITE_WEBHOOK_TOKEN,
-          'Idempotency-Key': row.id + ':sender-acceptance' },
-        body: JSON.stringify({ channel: 'email', destination: accepted.email,
-          subject: 'Agreement accepted: ' + accepted.title,
-          message: 'The sender accepted your agreement.' + (accepted.settlementOption ? ' Selected settlement option: ' + accepted.settlementOption + '.' : '') + ' The PDF is attached.',
-          attachments: [{ filename: accepted.signatureMode === 'mock' ? 'sandbox-agreement.pdf' : 'signed-agreement.pdf',
-            contentType: 'application/pdf', contentBase64: attachment }] }) });
-      if (!delivery.ok) fail(502, 'Acceptance saved. The email gateway rejected delivery. Retry from the dashboard.');
-      transaction(() => {
-        const info = detail(get(row.id));
-        if (info.acceptanceEmailAt) return;
-        info.acceptanceEmailAt = new Date().toISOString();
-        run('UPDATE agreements SET details=? WHERE id=?', pack(info, row.id + ':details'), row.id);
-        audit(req, row.id, 'acceptance_email_gateway_accepted');
-      });
-      return send(res, 200, { emailStatus: 'Gateway accepted' });
+      if (!zohoMail && !env.INVITE_WEBHOOK) return send(res, 200, { emailStatus: 'Accepted. Email delivery is unconfigured.' });
+      if (pendingAcceptanceEmails.has(row.id)) fail(409, 'An acceptance email is already being sent');
+      pendingAcceptanceEmails.add(row.id);
+      try {
+        const attachment = pdf(get(row.id), 'final');
+        const filename = accepted.signatureMode === 'mock' ? 'sandbox-agreement.pdf' : 'signed-agreement.pdf';
+        const subject = 'Agreement accepted: ' + accepted.title;
+        const message = 'The sender accepted your agreement.' + (accepted.settlementOption ? ' Selected settlement option: ' + accepted.settlementOption + '.' : '') + ' The PDF is attached.';
+        if (zohoMail) {
+          try {
+            await zohoMail.send({ to: accepted.email, subject, text: message, copySender: true,
+              attachments: [{ filename, contentType: 'application/pdf', content: attachment }],
+              messageId: '<' + row.id + '.acceptance@' + zohoMail.address.split('@').at(-1) + '>' });
+          } catch {
+            fail(502, 'Acceptance saved. Zoho Mail could not send the PDF. Check SMTP settings and retry.');
+          }
+        } else {
+          const url = new URL(env.INVITE_WEBHOOK);
+          if (url.protocol !== 'https:' || !env.INVITE_WEBHOOK_TOKEN) fail(503, 'Email gateway needs HTTPS and a token');
+          const delivery = await fetch(url, { method: 'POST', redirect: 'error', signal: AbortSignal.timeout(15000),
+            headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + env.INVITE_WEBHOOK_TOKEN,
+              'Idempotency-Key': row.id + ':sender-acceptance' },
+            body: JSON.stringify({ channel: 'email', destination: accepted.email, subject, message,
+              attachments: [{ filename, contentType: 'application/pdf', contentBase64: attachment.toString('base64') }] }) });
+          if (!delivery.ok) fail(502, 'Acceptance saved. The email gateway rejected delivery. Retry from the dashboard.');
+        }
+        transaction(() => {
+          const info = detail(get(row.id));
+          if (info.acceptanceEmailAt) return;
+          info.acceptanceEmailAt = new Date().toISOString();
+          run('UPDATE agreements SET details=? WHERE id=?', pack(info, row.id + ':details'), row.id);
+          audit(req, row.id, 'acceptance_email_gateway_accepted', { provider: zohoMail ? 'zoho' : 'webhook' });
+        });
+        return send(res, 200, { emailStatus: zohoMail ? 'Zoho Mail accepted the email' : 'Gateway accepted' });
+      } finally {
+        pendingAcceptanceEmails.delete(row.id);
+      }
     }
     if (method === 'POST' && action === 'invite') {
       if (['Expired', 'Signed', 'Declined'].includes(publicInfo(row).status)) fail(409, 'Link is closed');
@@ -352,6 +371,15 @@ async function route(req, res) {
       const destination = channel === 'email' ? info.email : channel === 'sms' ? info.phone : '';
       if (!destination) fail(400, 'Invalid invitation channel or missing destination');
       const message = info.sender + ' invited you to review and sign ' + info.title + '. ' + link(row);
+      if (channel === 'email' && zohoMail) {
+        if (['127.0.0.1', 'localhost', '[::1]'].includes(new URL(origin).hostname)) {
+          fail(409, 'Set a recipient-accessible PUBLIC_ORIGIN before emailing signing links');
+        }
+        try { await zohoMail.send({ to: destination, subject: 'Agreement for signature', text: message }); }
+        catch { fail(502, 'Zoho Mail could not send the invitation. Check SMTP settings.'); }
+        transaction(() => audit(req, row.id, 'invite_gateway_accepted', { channel, provider: 'zoho' }));
+        return send(res, 200, { deliveredToGateway: true });
+      }
       if (env.INVITE_WEBHOOK) {
         const url = new URL(env.INVITE_WEBHOOK);
         if (url.protocol !== 'https:' || !env.INVITE_WEBHOOK_TOKEN) fail(503, 'Invitation gateway needs HTTPS and a token');
@@ -417,6 +445,9 @@ app.listen(port, host, () => {
   console.log('Accord ' + mode + ' is available at ' + origin);
   if (mode === 'mock') console.log('Sandbox sender credentials: ' + owner + ' / ' + password);
 });
+
+
+
 
 
 

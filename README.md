@@ -1,6 +1,6 @@
 # Accord
 
-Accord is a single-sender agreement workspace with a local signing sandbox and an ASP adapter boundary. It runs on Node.js 24 with no npm dependencies.
+Accord is a single-sender agreement workspace with a local signing sandbox and an ASP adapter boundary. It runs on Node.js 24 with Nodemailer for optional SMTP delivery.
 
 ## Quick start
 
@@ -85,3 +85,15 @@ The authenticated sender selects **Accept & email** on a signed agreement. The a
 - `POST /api/agreements/:id/accept` requires sender authentication and a JSON body of `{}`. The configured gateway receives an email request with `attachments: [{filename, contentType, contentBase64}]` and an `Idempotency-Key` header. The gateway must deduplicate on that key. Its acknowledgment is recorded separately from acceptance and does not prove inbox delivery.
 
 Recipients must choose **Option 1**, **Option 2**, or **Option 3** before accepting and proceeding to eSign. The selection is recorded with consent and appears on the sender dashboard, audit export, and sender acceptance email. The labels refer to terms in the agreement. To include the election in the bytes covered by a live PDF signature, prepare a PDF showing the selected option and obtain review and consent for that exact PDF before invoking eSign.
+
+
+## Zoho Mail delivery
+
+Install the locked dependency with `npm ci`. Copy `.env.example` to `.env` next to `package.json`, uncomment the Zoho settings, and fill them in locally. Use the SMTP hostname shown for your exact account in Zoho Mail **Settings → Mail Accounts**. Set the full sending mailbox as `ZOHO_SMTP_USER` and an app-specific password from Zoho Accounts **Security → App Passwords** as `ZOHO_SMTP_PASSWORD`. Use port 465 for implicit TLS or 587 for required STARTTLS. Keep `.env` private.
+
+Run `npm run check:mail` to verify SMTP authentication without sending an email. Restart Accord with `npm start`. **Email invite** sends the link via Zoho, and **Accept & email** sends the approved PDF with the selected settlement option in the message. Zoho SMTP acceptance does not guarantee inbox delivery. The invitation requires a recipient-accessible `PUBLIC_ORIGIN`. The default loopback origin is for local review only. SMS still uses the existing invitation gateway or draft behavior.
+
+- [Zoho Mail SMTP setup](https://www.zoho.com/mail/help/zoho-smtp.html)
+- [Zoho Accounts security and app passwords](https://help.zoho.com/portal/en/kb/accounts/manage-your-zoho-account/articles/securing-your-zoho-account)
+
+For CREDANTIX, the SMTP login and From address default to `admin@credantix.com`. The signed PDF is emailed to the recipient and copied to that mailbox when an authenticated sender selects **Accept & email**. SMTP credentials are separate from the Accord sender login. Set `SENDER_USER=admin@credantix.com` and a private `SENDER_PASSWORD` in `.env` to use the mailbox address as the Accord login name.

@@ -1,1 +1,1 @@
-{"name":"accord-esign","private":true,"type":"module","scripts":{"start":"node server.mjs","test":"node --test"},"engines":{"node":">=24"}}
+{"name":"accord-esign","private":true,"type":"module","scripts":{"start":"node --env-file-if-exists=.env server.mjs","test":"node --test","check:mail":"node --env-file-if-exists=.env check-mail.mjs"},"engines":{"node":">=24"},"dependencies":{"nodemailer":"10.6.1"}}
