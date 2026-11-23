@@ -83,3 +83,5 @@ The authenticated sender selects **Accept & email** on a signed agreement. The a
 - `POST /api/review/decline` requires the recipient bearer token, `reviewed: true` and the decision `Decline agreement`.
 - `POST /api/review/start` requires the decision `Accept agreement` along with review and signature consent.
 - `POST /api/agreements/:id/accept` requires sender authentication and a JSON body of `{}`. The configured gateway receives an email request with `attachments: [{filename, contentType, contentBase64}]` and an `Idempotency-Key` header. The gateway must deduplicate on that key. Its acknowledgment is recorded separately from acceptance and does not prove inbox delivery.
+
+Recipients must choose **Option 1**, **Option 2**, or **Option 3** before accepting and proceeding to eSign. The selection is recorded with consent and appears on the sender dashboard, audit export, and sender acceptance email. The labels refer to terms in the agreement. To include the election in the bytes covered by a live PDF signature, prepare a PDF showing the selected option and obtain review and consent for that exact PDF before invoking eSign.

@@ -139,6 +139,7 @@ function pdf(row, field) {
 const pdfHeaders = { 'Content-Type': 'application/pdf' };
 const publicInfo = row => { const info = detail(row); return { id: row.id, ...info, expires: row.expires, status: info.declinedAt ? 'Declined' : status(row) }; };
 const decisions = ['Accept agreement', 'Decline agreement'];
+const settlementOptions = ['Option 1', 'Option 2', 'Option 3'];
 const consentText = 'I have reviewed this agreement and consent to sign this exact document electronically.';
 const normalizePdf = value => {
   if (typeof value !== 'string' || !/^[A-Za-z0-9+/]+={0,2}$/.test(value)) fail(400, 'Upload a valid PDF');
@@ -176,13 +177,14 @@ async function initiate(req, row) {
   if (input.reviewed !== true || input.consent !== true) fail(400, 'Review and consent are required');
   if (status(row) !== 'Viewed') fail(409, 'Open the PDF before starting a signing attempt');
   if (input.decision !== decisions[0]) fail(400, 'Select Accept agreement to proceed');
+  if (!settlementOptions.includes(input.settlementOption)) fail(400, 'Select a settlement option');
   if (detail(row).declinedAt) fail(409, 'Agreement was declined');
   const original = pdf(row, 'original');
   const info = detail(row);
   const id = randomUUID(), expires = Math.min(row.expires, Date.now() + 600000);
-  const initial = { decision: input.decision, documentSha256: info.sha256, signingDigest: info.sha256, mode, requestedAt: new Date().toISOString() };
+  const initial = { decision: input.decision, settlementOption: input.settlementOption, documentSha256: info.sha256, signingDigest: info.sha256, mode, requestedAt: new Date().toISOString() };
   if (adapter) {
-    const prepared = await adapter.start({ attemptId: id, expires, original, documentSha256: info.sha256,
+    const prepared = await adapter.start({ attemptId: id, expires, original, settlementOption: initial.settlementOption, documentSha256: info.sha256,
       callbackUrl: origin + '/api/esign/callback', returnUrl: origin + '/review' });
     if (!/^[a-f0-9]{64}$/.test(prepared.signingDigest) || new URL(prepared.redirectUrl).protocol !== 'https:') {
       fail(502, 'Invalid provider response');
@@ -194,7 +196,7 @@ async function initiate(req, row) {
   transaction(() => {
     if (['Signed', 'Expired'].includes(status(get(row.id))) || Date.now() >= expires) fail(409, 'Agreement is no longer signable');
     run('INSERT INTO attempts VALUES(?,?,?,NULL,?)', id, row.id, expires, pack(initial, id + ':attempt'));
-    audit(req, row.id, 'consent_received', { attemptId: id, consent: true, consentText, decision: initial.decision, reviewed: true, documentSha256: info.sha256 });
+    audit(req, row.id, 'consent_received', { attemptId: id, consent: true, consentText, decision: initial.decision, settlementOption: initial.settlementOption, reviewed: true, documentSha256: info.sha256 });
   });
   return { attemptId: id, expires, redirectUrl: initial.redirectUrl, mode };
 }
@@ -222,6 +224,7 @@ async function callback(req) {
     const row = get(attempt.agreement);
     if (Date.now() >= attempt.expires || ['Signed', 'Expired'].includes(status(row))) fail(409, 'Signing attempt is closed');
     const initial = evidence(attempt);
+    if (mock && initial.settlementOption !== result.settlementOption) fail(409, 'Settlement option mismatch');
     if (initial.mode !== mode || initial.signingDigest !== result.signingDigest) fail(409, 'Signing digest mismatch');
     const info = detail(row);
     if (info.matchName && nameKey(info.name) !== nameKey(result.signerName)) {
@@ -235,12 +238,13 @@ async function callback(req) {
     if (info.declinedAt) fail(409, 'Agreement was declined');
     info.debtor = { name: result.signerName, source: mode === 'mock' ? 'Sandbox signer' : 'Verified signing certificate' };
     info.decision = initial.decision;
+    info.settlementOption = initial.settlementOption;
     info.finalSha256 = digest(final);
     info.signatureMode = mode;
     run('UPDATE agreements SET status=?,details=?,final=? WHERE id=?', 'Signed', pack(info, row.id + ':details'), seal(final, row.id + ':final'), row.id);
     run('UPDATE attempts SET last_event=?,evidence=? WHERE id=?', result.eventId,
       pack({ ...initial, signerName: result.signerName, receipt: result.receipt ?? response }, attempt.id + ':attempt'), attempt.id);
-    audit(req, row.id, 'signed', { attemptId: attempt.id, eventId: result.eventId, consent: true, mode,
+    audit(req, row.id, 'signed', { attemptId: attempt.id, eventId: result.eventId, consent: true, settlementOption: initial.settlementOption, mode,
       signingDigest: result.signingDigest, finalSha256: info.finalSha256 });
     return { status: 'Signed' };
   });
@@ -256,7 +260,7 @@ async function simulate(req, row) {
   const attempt = query('SELECT * FROM attempts WHERE id=? AND agreement=?', clean(input.attemptId, 80), row.id);
   const signerName = clean(input.signerName, 120);
   if (!attempt || !signerName) fail(400, 'A signing attempt and test signer name are required');
-  const response = mock.respond({ attemptId: attempt.id, eventId: randomUUID(), signerName, signingDigest: evidence(attempt).signingDigest });
+  const response = mock.respond({ attemptId: attempt.id, eventId: randomUUID(), signerName, settlementOption: evidence(attempt).settlementOption, signingDigest: evidence(attempt).signingDigest });
   if (!tls) {
     const responseFromCallback = await fetch('http://127.0.0.1:' + app.address().port + '/api/esign/callback', {
       method: 'POST', body: JSON.stringify(response), signal: AbortSignal.timeout(5000),
@@ -328,7 +332,7 @@ async function route(req, res) {
           'Idempotency-Key': row.id + ':sender-acceptance' },
         body: JSON.stringify({ channel: 'email', destination: accepted.email,
           subject: 'Agreement accepted: ' + accepted.title,
-          message: 'The sender accepted your agreement. The PDF is attached.',
+          message: 'The sender accepted your agreement.' + (accepted.settlementOption ? ' Selected settlement option: ' + accepted.settlementOption + '.' : '') + ' The PDF is attached.',
           attachments: [{ filename: accepted.signatureMode === 'mock' ? 'sandbox-agreement.pdf' : 'signed-agreement.pdf',
             contentType: 'application/pdf', contentBase64: attachment }] }) });
       if (!delivery.ok) fail(502, 'Acceptance saved. The email gateway rejected delivery. Retry from the dashboard.');
@@ -371,7 +375,7 @@ async function route(req, res) {
       const info = detail(row);
       const sha256 = digest(pdf(row, 'original'));
       return send(res, 200, { title: info.title, name: info.name, sender: info.sender, created: info.created, status: row.status,
-        expires: row.expires, integrityVerified: true, sha256, consentText, mode, decisions, declinedAt: info.declinedAt, debtor: info.debtor });
+        expires: row.expires, integrityVerified: true, sha256, consentText, mode, decisions, settlementOptions, settlementOption: info.settlementOption, declinedAt: info.declinedAt, debtor: info.debtor });
     }
     if (method === 'GET' && pathname === '/api/review/pdf') {
       const original = pdf(row, 'original');
@@ -413,6 +417,8 @@ app.listen(port, host, () => {
   console.log('Accord ' + mode + ' is available at ' + origin);
   if (mode === 'mock') console.log('Sandbox sender credentials: ' + owner + ' / ' + password);
 });
+
+
 
 
 

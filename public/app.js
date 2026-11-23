@@ -74,7 +74,7 @@ async function dashboard() {
       filtered.map(item => {
         const endpoint = '/api/agreements/' + item.id;
         return '<tr><td><strong>' + escapeHtml(item.title) + '</strong></td><td>' + escapeHtml(item.debtor?.name ?? item.name) +
-          '<small>' + escapeHtml(item.email || item.phone) + '</small></td><td><span class="tag ' + item.status + '">' + item.status +
+          '<small>' + escapeHtml(item.email || item.phone) + '</small>' + (item.settlementOption ? '<small>Settlement: ' + escapeHtml(item.settlementOption) + '</small>' : '') + '</td><td><span class="tag ' + item.status + '">' + item.status +
           '</span>' + (item.acceptedAt ? '<small>' + (item.acceptanceEmailAt ? 'Accepted · Email queued' : 'Accepted · Email pending') + '</small>' : '') + '</td><td>' + escapeHtml(date(item.expires)) + '</td><td><div class="actions">' +
           (item.link ? button('Share', 'data-id="' + item.id + '"') : '') +
           (item.status === 'Signed' ? '<a class="button" href="' + endpoint + '/signed">' + (item.signatureMode === 'mock' ? 'Sandbox PDF' : 'Signed PDF') + '</a>' : '') +
@@ -195,10 +195,10 @@ async function review() {
     return;
   }
   if (info.status === 'Signed') {
-    panel.textContent = info.mode === 'mock' ? 'Sandbox signing completed.' : 'This agreement has been signed.';
+    panel.textContent = (info.mode === 'mock' ? 'Sandbox signing completed.' : 'This agreement has been signed.') + (info.settlementOption ? ' Selected settlement: ' + info.settlementOption + '.' : '');
     return;
   }
-  panel.innerHTML = `<form id="consent"><label>Your decision<select name="decision" required><option value="">Select an option</option>${info.decisions.map(option => '<option>' + escapeHtml(option) + '</option>').join('')}</select></label><label class="check"><input type="checkbox" required name="reviewed">I scrolled through and read the full agreement.</label>
+  panel.innerHTML = `<form id="consent"><label>Settlement option<select name="settlementOption" required><option value="">Select an option</option>${info.settlementOptions.map(option => '<option>' + escapeHtml(option) + '</option>').join('')}</select></label><label>Your decision<select name="decision" required><option value="">Select an option</option>${info.decisions.map(option => '<option>' + escapeHtml(option) + '</option>').join('')}</select></label><label class="check"><input type="checkbox" required name="reviewed">I scrolled through and read the full agreement.</label>
     <label class="check"><input type="checkbox" required name="consent">${escapeHtml(info.consentText)}</label>
     <p class="error" role="alert"></p><button class="primary">${info.mode === 'mock' ? 'Continue to sandbox eSign' : 'Continue to Aadhaar eSign'}</button></form>
     <dialog id="sandbox"><h2>Sandbox eSign</h2><p>Simulate provider approval using a test signer name.</p><form id="mock">
@@ -209,9 +209,12 @@ async function review() {
   let attempt;
   const decision = consent.elements.decision;
   const signatureConsent = consent.elements.consent;
+  const settlementOption = consent.elements.settlementOption;
   decision.onchange = () => {
     const declining = decision.value === 'Decline agreement';
     signatureConsent.required = !declining;
+    settlementOption.required = !declining;
+    settlementOption.disabled = declining;
     signatureConsent.closest('label').hidden = declining;
     consent.querySelector('button').textContent = declining ? 'Submit decision' :
       (info.mode === 'mock' ? 'Continue to sandbox eSign' : 'Continue to Aadhaar eSign');
@@ -228,7 +231,7 @@ async function review() {
         return;
       }
       attempt = await request('/api/review/start', { token, body: {
-        decision: decision.value,
+        decision: decision.value, settlementOption: settlementOption.value,
         reviewed: consent.elements.reviewed.checked, consent: consent.elements.consent.checked,
       } });
       if (attempt.redirectUrl) location.assign(attempt.redirectUrl);
@@ -249,7 +252,7 @@ async function review() {
       const result = await request('/api/review/simulate', { token, body: { attemptId: attempt.attemptId, signerName: simulate.elements.name.value } });
       if (result.status !== 'Signed') throw Error(result.reason ?? 'Signature rejected');
       dialog.close();
-      panel.innerHTML = '<p class="ok" role="status">Sandbox signing completed</p>';
+      panel.textContent = 'Sandbox signing completed. Selected settlement: ' + settlementOption.value + '.';
       sessionStorage.removeItem('accord-review');
     } catch (error) { simulate.querySelector('.error').textContent = error.message; }
     finally { button.disabled = false; }
@@ -257,4 +260,6 @@ async function review() {
 }
 
 (location.pathname === '/' ? dashboard() : review()).catch(errorPage);
+
+
 

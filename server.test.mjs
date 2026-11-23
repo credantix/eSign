@@ -55,10 +55,11 @@ test('agreement lifecycle, callback integrity and scope', { timeout: 20000 }, as
     const uploadBearer = 'Bearer ' + new URL(uploaded.link).hash.slice(1);
     assert.equal((await call('/api/review/pdf', uploadBearer)).status, 200);
     assert.equal((await call('/api/review/decline', uploadBearer, { reviewed: true, decision: 'Decline agreement' })).status, 200);
-    assert.equal((await call('/api/review/start', uploadBearer, { reviewed: true, consent: true, decision: 'Accept agreement' })).status, 409);
+    assert.equal((await call('/api/review/start', uploadBearer, { reviewed: true, consent: true, decision: 'Accept agreement', settlementOption: 'Option 2' })).status, 409);
     assert.equal((await (await call(endpoint + '/invite', sender, { channel: 'email' })).json()).url.startsWith('mailto:'), true);
     assert.equal((await call('/api/review/start', bearer, { reviewed: false, consent: true })).status, 400);
-    const attempt = await (await call('/api/review/start', bearer, { reviewed: true, consent: true, decision: 'Accept agreement' })).json();
+    assert.equal((await call('/api/review/start', bearer, { reviewed: true, consent: true, decision: 'Accept agreement' })).status, 400);
+    const attempt = await (await call('/api/review/start', bearer, { reviewed: true, consent: true, decision: 'Accept agreement', settlementOption: 'Option 2' })).json();
     assert.equal((await call('/api/esign/callback', null, { message: 'abc', signature: 'def' })).status, 403);
     const simulate = signerName => call('/api/review/simulate', bearer, { attemptId: attempt.attemptId, signerName });
     assert.equal((await (await simulate('Wrong Name')).json()).status, 'Rejected');
@@ -71,6 +72,7 @@ test('agreement lifecycle, callback integrity and scope', { timeout: 20000 }, as
       ['link_created', 'document_viewed', 'invite_draft_requested', 'consent_received', 'signer_mismatch', 'signed']);
     assert.equal(audit.agreement.debtor.name, 'test recipient');
     assert.equal(audit.agreement.decision, 'Accept agreement');
+    assert.equal(audit.agreement.settlementOption, 'Option 2');
     assert.equal((await call(endpoint + '/accept', bearer, {})).status, 401);
     assert.equal((await call(endpoint + '/accept', sender, {})).status, 200);
     assert.equal((await call(endpoint + '/accept', sender, {})).status, 200);
@@ -91,5 +93,6 @@ test('agreement lifecycle, callback integrity and scope', { timeout: 20000 }, as
     await rm(folder, { recursive: true, force: true });
   }
 });
+
 
 
